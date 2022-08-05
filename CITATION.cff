@@ -1,0 +1,41 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: >-
+  Polyclonal Antibodies Avidity Resolution Tool
+  (PAART)
+message: >-
+  Please cite the repository when using PAART for
+  analysis or improving PAART
+type: software
+authors:
+  - given-names: Kan
+    family-names: Li
+    email: kl122@duke.edu
+    affiliation: >-
+      Center for Human Systems Immunology, Duke
+      University, Durham, NC, United States
+  - given-names: Richard
+    name-particle: H.C.
+    family-names: Huntwork
+    affiliation: >-
+      Center for Human Systems Immunology, Duke
+      University, Durham, NC, United States
+  - affiliation: 'Certara, Seattle, WA, United States'
+    given-names: Michael
+    family-names: Dodds
+  - given-names: Rachel
+    name-particle: L.
+    family-names: Spreng
+    email: rachel.spreng@duke.edu
+    affiliation: >-
+      Duke Human Vaccine Institute, Duke University,
+      Durham, NC, United States
+  - given-names: S. Moses
+    family-names: Dennison
+    affiliation: >-
+      Center for Human Systems Immunology, Duke
+      University, Durham, NC, United States
+    email: moses.sekaran@duke.edu
+license: GPL-3.0
