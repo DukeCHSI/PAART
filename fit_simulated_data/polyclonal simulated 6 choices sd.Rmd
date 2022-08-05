@@ -1,0 +1,652 @@
+---
+title: "PAART Analysis - Simulated Data"
+output: html_notebook
+---
+
+Package "gnm" is used to carry out sum of exponential fits; package "msm" is used to estimate standard error for responses and off rates using Delta method.
+```{r, warning = F}
+library(readxl)
+library(gnm)
+library(plyr)
+library(xlsx)
+library(grid)
+library(gridBase)
+library(gridExtra)
+library(msm)
+suppressPackageStartupMessages(library(R.utils))
+```
+
+Import compiled table containing raw data points and sample identifiers, example file formats are .xlsx, .csv and and .rdata 
+```{r}
+alldata = read_xlsx("Simulated PAART Data v2.xlsx", sheet = 1)
+```
+
+Import sample info sheet containing the sample identifiers, the fitting window for each curve, and whether to include a specific curve for fitting.
+```{r}
+samplewindow = read_xlsx("Simulated PAART Data windows v2.xlsx", sheet = 1)
+samplewindow = samplewindow[which(samplewindow$Include == "Y"),]
+```
+
+If there are duplicate rows in the info sheet, this line helps delete them.
+```{r}
+uniquesample = unique(samplewindow)
+```
+
+Parameter intialization options for responses:
+1. No initialization
+2. Zero
+3. The log of 100%, 1/2 or 1/3 of the highest response, depending on the number of components (recommended)
+4. The log of the highest response, regardless of number of components
+5. 100%, 1/2 or 1/3 of the highest response, depending on the number of components (not recommended)
+6. The highest response, regardless of number of components (not recommended)
+
+```{r}
+startnum = 1    # The starting row number in info sheet (uniquesample) to be included in fitting
+endnum = nrow(uniquesample)     # The ending row number in info sheet (uniquesample) to be included in fitting
+plotstart = 300     # The starting time of dissociation
+plotend = 900     # The ending time of dissociation
+normallist = 1:nrow(uniquesample)     # A list, could be the same as or a subset of the included rows, further excluding undesirable curves
+initchoice = 3    # The choice of parameter initialization
+rinfon = "N"    # Y or N, whether to include R_infinity in fitting
+thinfreq = 5    # Thinning frequency, for example, 5 means taking 1 out of every 5 data points. 1 for no thinning
+tmoutlimit = 1    # The maximum allowed time in seconds for each individual fitting step; if fitting fails to converge in the allowed time, the code will skip over this step; because the best fit will be selected out of repeated attemps of the same fitting type, this number affects the total fitting time.
+```
+
+Define the page titles to be used during PDF export.
+```{r}
+pagetitles = array(NA, dim = c(endnum-startnum+1))
+for (j in startnum:endnum)
+{
+  pagetitles[j] = paste(uniquesample$Participant.ID[j],"_",uniquesample$Visit[j])
+}
+```
+
+Execute as is.
+```{r}
+comp1fitstat = array(NA, dim = c(endnum-startnum+1,5))
+comp2fitstat = array(NA, dim = c(endnum-startnum+1,9))
+comp3fitstat = array(NA, dim = c(endnum-startnum+1,13))
+comp1fitpass = array(NA, dim = c(endnum-startnum+1))
+comp2fitpass = array(NA, dim = c(endnum-startnum+1))
+comp3fitpass = array(NA, dim = c(endnum-startnum+1))
+```
+
+Execute as is.
+```{r}
+rawfull = list()
+rawpoint = list()
+rawpointplot = list()
+comp1fits = list()
+comp2fits = list()
+comp3fits = list()
+```
+
+Curve fitting
+```{r, warning=FALSE}
+for (j in normallist)
+{
+  # Use the compelete combination of identifiers (in this case participant.ID and Visit) to extract data points for individual curves
+  
+  sampledata = alldata[which(alldata$Participant.ID==uniquesample$Participant.ID[j] & alldata$Visit==uniquesample$Visit[j]),][,c("Time","Response")]
+  colnames(sampledata) = c("Time1","Response")
+  sampledata = sampledata[order(sampledata$Time1),]
+  
+  rawfull[[j]] = sampledata
+  
+  # Use the fitting window defined in the info sheet to truncate dissociation data; data thinning
+  
+  sampledata1 = sampledata[which(sampledata$Time1>=as.numeric(uniquesample$Start[j])&sampledata$Time1<as.numeric(uniquesample$Stop[j])),]
+  xfull = as.vector(t(t(sampledata1[,1]))) - as.vector(t(t(sampledata1[1,1])))
+  yfull = as.vector(t(t(sampledata1[,2])))
+  x = if(thinfreq==1){xfull}else{xfull[seq(1, length(xfull), thinfreq)]}
+  y = if(thinfreq==1){yfull}else{yfull[seq(1, length(yfull), thinfreq)]}
+  
+  rawpoint[[j]] = cbind(x,y)
+  
+  # Find maximum response, for parameter initialization during fitting
+  
+  ymaxtemp = max(y)
+  lgymaxtemp = if(ymaxtemp<1E-7){-7}else{log(ymaxtemp)}
+  lgymaxtemphf = if(ymaxtemp<1E-7){-7}else{log(ymaxtemp/2)}
+  lgymaxtempthd = if(ymaxtemp<1E-7){-7}else{log(ymaxtemp/3)}
+  
+  # Extract dissociation curve without data thinning for plotting purpose
+  
+  sampledata2 = sampledata[which(sampledata$Time1>=as.numeric(uniquesample$Start[j])&sampledata$Time1<plotend),]
+  x1full = as.vector(t(t(sampledata2[,1]))) - as.vector(t(t(sampledata2[1,1])))
+  y1full = as.vector(t(t(sampledata2[,2])))
+  x1 = if(thinfreq==1){x1full}else{x1full[seq(1, length(x1full), thinfreq)]}
+  y1 = if(thinfreq==1){y1full}else{y1full[seq(1, length(y1full), thinfreq)]}
+  
+  rawpointplot[[j]] = cbind(x1,y1)
+  
+  # Fitting when R_infinity is on
+  
+  if(rinfon == "Y")
+  {
+    
+    # Fitting of 2 off rate components
+    
+    saved.fits2 = list()
+  for (i in 1:20)
+    {
+    if(initchoice==1){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, NA, -0.0005, NA, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, 0, -0.0005, 0, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, lgymaxtemphf, -0.0005, lgymaxtemphf, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, lgymaxtemp, -0.0005, lgymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, ymaxtemp/2, -0.0005, ymaxtemp/2, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, ymaxtemp, -0.0005, ymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  if(length(saved.fits2)!=0)
+  {
+  for (i in 21:100)
+    {
+    if(initchoice==1){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, NA, -0.0005, NA, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, 0, -0.0005, 0, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, lgymaxtemphf, -0.0005, lgymaxtemphf, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, lgymaxtemp, -0.0005, lgymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, ymaxtemp/2, -0.0005, ymaxtemp/2, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2), start = c(0, ymaxtemp, -0.0005, ymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  }
+    
+    # Fitting of 3 off rate components
+    
+  saved.fits4 = list()
+  for (i in 1:20)
+    {
+    if(initchoice==1){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, NA, -0.0005, NA, -0.005, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, 0, -0.0005, 0, -0.005, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, lgymaxtempthd, -0.0005, lgymaxtempthd, -0.005, lgymaxtempthd, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, lgymaxtemp, -0.0005, lgymaxtemp, -0.005, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, ymaxtemp/3, -0.0005, ymaxtemp/3, -0.005, ymaxtemp/3, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, ymaxtemp, -0.0005, ymaxtemp, -0.005, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  if(length(saved.fits4)!=0)
+  {
+    for (i in 21:100)
+    {
+    if(initchoice==1){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, NA, -0.0005, NA, -0.005, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, 0, -0.0005, 0, -0.005, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, lgymaxtempthd, -0.0005, lgymaxtempthd, -0.005, lgymaxtempthd, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, lgymaxtemp, -0.0005, lgymaxtemp, -0.005, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, ymaxtemp/3, -0.0005, ymaxtemp/3, -0.005, ymaxtemp/3, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, ymaxtemp, -0.0005, ymaxtemp, -0.005, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+    while (length(saved.fits4)<100)
+    {
+      for (i in 100:100)
+      {
+    if(initchoice==1){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, NA, -0.0005, NA, -0.005, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, 0, -0.0005, 0, -0.005, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, lgymaxtempthd, -0.0005, lgymaxtempthd, -0.005, lgymaxtempthd, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, lgymaxtemp, -0.0005, lgymaxtemp, -0.005, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, ymaxtemp/3, -0.0005, ymaxtemp/3, -0.005, ymaxtemp/3, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3), start = c(0, ymaxtemp, -0.0005, ymaxtemp, -0.005, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+      }
+    }
+  }  
+  
+  # Fitting of 1 off rate component
+  
+  saved.fits5 = list()
+  for (i in 1:100)
+    {
+    if(initchoice==1){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1), start = c(0, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1), start = c(0, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1), start = c(0, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1), start = c(0, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1), start = c(0, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1), start = c(0, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  
+  fits2aic = array(NA,dim = c(100,1))
+  fits4aic = array(NA,dim = c(100,1))
+  fits5aic = array(NA,dim = c(100,1))
+  
+  # Find fits with the lowest AIC and record the parameter values and standard deviation
+  
+  # Record results for 2 component fit
+  
+  if(length(saved.fits2)==0)
+  {
+    comp2fits[[j]] = y
+    comp2fitstat[j,] = c(0,0,0.0000001,0,0,0,0.0000001,0,0)
+    fits2allpara = as.data.frame(t(rbind(rep(0,100),rep(0,100),rep(0.0000001,100),rep(0,100),rep(0.0000001,100))))
+    colnames(fits2allpara) = c("AIC","RU1","kd1","RU2","kd2")
+    comp2fitpass[j] = "N"
+  }
+  else
+  {
+  for (i in 1:100)
+  { 
+    if(capture.output(saved.fits2[[i]]) == "NULL"){fits2aic[i]  = 0}else{fits2aic[i] = AIC(saved.fits2[[i]])[1]}
+  }
+  
+  decayrt2 = array(NA,dim = c(4,100))
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits2[[i]]) != "NULL")
+    {
+      decayrt2[[1,i]] = signif(exp(as.numeric(saved.fits2[[i]]$coefficients[2])),3)
+      decayrt2[[2,i]] = signif(-as.numeric(saved.fits2[[i]]$coefficients[3]),3)
+      decayrt2[[3,i]] = signif(exp(as.numeric(saved.fits2[[i]]$coefficients[4])),3)
+      decayrt2[[4,i]] = signif(-as.numeric(saved.fits2[[i]]$coefficients[5]),3)
+    }
+  }
+  
+  fits2allpara = cbind(fits2aic,t(decayrt2))
+  fits2allpara = as.data.frame(fits2allpara)
+  colnames(fits2allpara) = c("AIC","RU1","kd1","RU2","kd2")
+  fits2allpara = fits2allpara[order(fits2allpara$AIC),]
+  
+  comp2fits[[j]] = saved.fits2[[as.numeric(rownames(fits2allpara)[1])]]
+  comp2temp = as.numeric(fits2allpara[1,])
+  comp2temp2 = as.data.frame(split(comp2temp[-1], rep(1:2)))
+  comp2sdtemp = signif(deltamethod(c(~x1,~exp(x2),~-x3,~exp(x4),~-x5), coefficients(comp2fits[[j]]), vcov(comp2fits[[j]])),3)
+  comp2sdtemp2 = as.data.frame(split(comp2sdtemp[-1], rep(1:2)))
+  comp2sdtemp3 = cbind(comp2temp2,comp2sdtemp2)
+  comp2temp3 = comp2sdtemp3[order(abs(comp2sdtemp3[,2]), decreasing = F),]
+  comp2temp4 = as.numeric(unlist(t(comp2temp3)))
+  comp2temp5 = c(comp2temp[1],comp2temp4)
+  comp2fitstat[j,] = comp2temp5
+  comp2fitpass[j] = "Y"
+  }
+  
+  # Record results for 3 component fit
+  
+  if(length(saved.fits4)==0)
+  {
+    comp3fits[[j]] = y
+    comp3fitstat[j,] = c(0,0,0.0000001,0,0,0,0.0000001,0,0,0,0.0000001,0,0)
+    fits4allpara = as.data.frame(t(rbind(rep(0,100),rep(0,100),rep(0.0000001,100),rep(0,100),rep(0.0000001,100),rep(0,100),rep(0.0000001,100))))
+    colnames(fits4allpara) = c("AIC","RU1","kd1","RU2","kd2","RU3","kd3")
+    comp3fitpass[j] = "N"
+  }
+  else
+  {
+  for (i in 1:100)
+  { 
+    if(capture.output(saved.fits4[[i]]) == "NULL"){fits4aic[i]  = 0}else{fits4aic[i] = AIC(saved.fits4[[i]])[1]}
+  }
+  
+  decayrt4 = array(NA,dim = c(6,100))
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits4[[i]]) != "NULL")
+    {
+      decayrt4[[1,i]] = signif(exp(as.numeric(saved.fits4[[i]]$coefficients[2])),3)
+      decayrt4[[2,i]] = signif(-as.numeric(saved.fits4[[i]]$coefficients[3]),3)
+      decayrt4[[3,i]] = signif(exp(as.numeric(saved.fits4[[i]]$coefficients[4])),3)
+      decayrt4[[4,i]] = signif(-as.numeric(saved.fits4[[i]]$coefficients[5]),3)
+      decayrt4[[5,i]] = signif(exp(as.numeric(saved.fits4[[i]]$coefficients[6])),3)
+      decayrt4[[6,i]] = signif(-as.numeric(saved.fits4[[i]]$coefficients[7]),3)
+    }
+  }
+  
+  fits4allpara = cbind(fits4aic,t(decayrt4))
+  fits4allpara = as.data.frame(fits4allpara)
+  colnames(fits4allpara) = c("AIC","RU1","kd1","RU2","kd2","RU3","kd3")
+  fits4allpara = fits4allpara[order(fits4allpara$AIC),]
+ 
+  comp3fits[[j]] = saved.fits4[[as.numeric(rownames(fits4allpara)[1])]]
+  comp3temp = as.numeric(fits4allpara[1,])
+  comp3temp2 = as.data.frame(split(comp3temp[-1], rep(1:2)))
+  comp3sdtemp = signif(deltamethod(c(~x1,~exp(x2),~-x3,~exp(x4),~-x5,~exp(x6),~-x7), coefficients(comp3fits[[j]]), vcov(comp3fits[[j]])),3)
+  comp3sdtemp2 = as.data.frame(split(comp3sdtemp[-1], rep(1:2)))
+  comp3sdtemp3 = cbind(comp3temp2,comp3sdtemp2)
+  comp3temp3 = comp3sdtemp3[order(abs(comp3sdtemp3[,2]), decreasing = F),]
+  comp3temp4 = as.numeric(unlist(t(comp3temp3)))
+  comp3temp5 = c(comp3temp[1],comp3temp4)
+  comp3fitstat[j,] = comp3temp5
+  comp3fitpass[j] = "Y"
+  }
+  
+  # Record results for 1 component fit
+  
+  if(length(saved.fits5)==0)
+  {
+    comp1fits[[j]] = y
+    comp1fitstat[j,] = c(0,0,0.0000001,0,0)
+    fits5allpara = as.data.frame(t(rbind(rep(0,100),rep(0,100),rep(0.0000001,100))))
+    colnames(fits5allpara) = c("AIC","RU1","kd1")
+    comp1fitpass[j] = "N"
+  }
+  else
+  {
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits5[[i]]) == "NULL"){fits5aic[i]  = 0}else{fits5aic[i] = AIC(saved.fits5[[i]])[1]}
+  }
+  
+  decayrt5 = array(NA,dim = c(2,100))
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits5[[i]]) != "NULL")
+    {
+      decayrt5[[1,i]] = signif(exp(as.numeric(saved.fits5[[i]]$coefficients[2])),3)
+      decayrt5[[2,i]] = signif(-as.numeric(saved.fits5[[i]]$coefficients[3]),3)
+    }
+  }
+  
+  fits5allpara = cbind(fits5aic,t(decayrt5))
+  fits5allpara = as.data.frame(fits5allpara)
+  colnames(fits5allpara) = c("AIC","RU1","kd1")
+  fits5allpara = fits5allpara[order(fits5allpara$AIC),]
+  
+  comp1fits[[j]] = saved.fits5[[as.numeric(rownames(fits5allpara)[1])]]
+  comp1sdtemp = signif(deltamethod(c(~x1,~exp(x2),~-x3), coefficients(comp1fits[[j]]), vcov(comp1fits[[j]])),3)
+  comp1fitstat[j,] = c(as.numeric(fits5allpara[1,]),comp1sdtemp[-1])
+  comp1fitpass[j] = "Y"
+  }
+  }
+  
+  # Fitting when R_infinity is off
+  
+  else
+  {
+    
+  # Fitting of 2 off rate components
+    
+  saved.fits2 = list()
+  for (i in 1:20)
+    {
+    if(initchoice==1){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(NA, -0.0005, NA, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(0, -0.0005, 0, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(lgymaxtemphf, -0.0005, lgymaxtemphf, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(lgymaxtemp, -0.0005, lgymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(ymaxtemp/2, -0.0005, ymaxtemp/2, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(ymaxtemp, -0.0005, ymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  if(length(saved.fits2)!=0)
+  {
+    for (i in 21:100)
+    {
+    if(initchoice==1){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(NA, -0.0005, NA, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(0, -0.0005, 0, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(lgymaxtemphf, -0.0005, lgymaxtemphf, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(lgymaxtemp, -0.0005, lgymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(ymaxtemp/2, -0.0005, ymaxtemp/2, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits2[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 2)+0, start = c(ymaxtemp, -0.0005, ymaxtemp, -0.005), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  }
+  
+  # Fitting of 3 off rate components
+  
+  saved.fits4 = list()
+  for (i in 1:20)
+    {
+    if(initchoice==1){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(NA, -0.0005, NA, -0.005, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(0, -0.0005, 0, -0.005, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(lgymaxtempthd, -0.0005, lgymaxtempthd, -0.005, lgymaxtempthd, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(lgymaxtemp, -0.0005, lgymaxtemp, -0.005, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(ymaxtemp/3, -0.0005, ymaxtemp/3, -0.005, ymaxtemp/3, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(ymaxtemp, -0.0005, ymaxtemp, -0.005, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  if(length(saved.fits4)!=0)
+  {
+    for (i in 21:100)
+    {
+    if(initchoice==1){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(NA, -0.0005, NA, -0.005, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(0, -0.0005, 0, -0.005, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(lgymaxtempthd, -0.0005, lgymaxtempthd, -0.005, lgymaxtempthd, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(lgymaxtemp, -0.0005, lgymaxtemp, -0.005, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(ymaxtemp/3, -0.0005, ymaxtemp/3, -0.005, ymaxtemp/3, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(ymaxtemp, -0.0005, ymaxtemp, -0.005, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+    while (length(saved.fits4)<100)
+    {
+      for (i in 100:100)
+      {
+    if(initchoice==1){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(NA, -0.0005, NA, -0.005, NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(0, -0.0005, 0, -0.005, 0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(lgymaxtempthd, -0.0005, lgymaxtempthd, -0.005, lgymaxtempthd, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(lgymaxtemp, -0.0005, lgymaxtemp, -0.005, lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(ymaxtemp/3, -0.0005, ymaxtemp/3, -0.005, ymaxtemp/3, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits4[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 3)+0, start = c(ymaxtemp, -0.0005, ymaxtemp, -0.005, ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+      }
+    }
+  }
+  
+  # Fitting of 1 off rate component
+  
+  saved.fits5 = list()
+  for (i in 1:100)
+    {
+    if(initchoice==1){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1)+0, start = c(NA, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==2){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1)+0, start = c(0, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==3){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1)+0, start = c(lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==4){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1)+0, start = c(lgymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else if(initchoice==5){saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1)+0, start = c(ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    else{saved.fits5[[i]] = withTimeout(gnm(y ~ instances(Exp(1 + x), 1)+0, start = c(ymaxtemp, -0.05), verbose = FALSE, iterMax = 20000), timeout=tmoutlimit, onTimeout = "silent")}
+    }
+  
+  fits2aic = array(NA,dim = c(100,1))
+  fits4aic = array(NA,dim = c(100,1))
+  fits5aic = array(NA,dim = c(100,1))
+  
+  # Find fits with the lowest AIC and record the parameter values and standard deviation
+  
+  # Record results for 2 component fit
+  
+  if(length(saved.fits2)==0)
+  {
+    comp2fits[[j]] = y
+    comp2fitstat[j,] = c(0,0,0.0000001,0,0,0,0.0000001,0,0)
+    fits2allpara = as.data.frame(t(rbind(rep(0,100),rep(0,100),rep(0.0000001,100),rep(0,100),rep(0.0000001,100))))
+    colnames(fits2allpara) = c("AIC","RU1","kd1","RU2","kd2")
+    comp2fitpass[j] = "N"
+  }
+  else
+  {
+  for (i in 1:100)
+  { 
+    if(capture.output(saved.fits2[[i]]) == "NULL"){fits2aic[i]  = 0}else{fits2aic[i] = AIC(saved.fits2[[i]])[1]}
+  }
+  
+  decayrt2 = array(NA,dim = c(4,100))
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits2[[i]]) != "NULL")
+    {
+      decayrt2[[1,i]] = signif(exp(as.numeric(saved.fits2[[i]]$coefficients[1])),3)
+      decayrt2[[2,i]] = signif(-as.numeric(saved.fits2[[i]]$coefficients[2]),3)
+      decayrt2[[3,i]] = signif(exp(as.numeric(saved.fits2[[i]]$coefficients[3])),3)
+      decayrt2[[4,i]] = signif(-as.numeric(saved.fits2[[i]]$coefficients[4]),3)
+    }
+  }
+  
+  fits2allpara = cbind(fits2aic,t(decayrt2))
+  fits2allpara = as.data.frame(fits2allpara)
+  colnames(fits2allpara) = c("AIC","RU1","kd1","RU2","kd2")
+  fits2allpara = fits2allpara[order(fits2allpara$AIC),]
+  
+  comp2fits[[j]] = saved.fits2[[as.numeric(rownames(fits2allpara)[1])]]
+  comp2temp = as.numeric(fits2allpara[1,])
+  comp2temp2 = as.data.frame(split(comp2temp[-1], rep(1:2)))
+  comp2sdtemp = signif(deltamethod(c(~exp(x1),~-x2,~exp(x3),~-x4), coefficients(comp2fits[[j]]), vcov(comp2fits[[j]])),3)
+  comp2sdtemp2 = as.data.frame(split(comp2sdtemp, rep(1:2)))
+  comp2sdtemp3 = cbind(comp2temp2,comp2sdtemp2)
+  comp2temp3 = comp2sdtemp3[order(abs(comp2sdtemp3[,2]), decreasing = F),]
+  comp2temp4 = as.numeric(unlist(t(comp2temp3)))
+  comp2temp5 = c(comp2temp[1],comp2temp4)
+  comp2fitstat[j,] = comp2temp5
+  comp2fitpass[j] = "Y"
+  }
+  
+  # Record results for 3 component fit
+
+  
+  if(length(saved.fits4)==0)
+  {
+    comp3fits[[j]] = y
+    comp3fitstat[j,] = c(0,0,0.0000001,0,0,0,0.0000001,0,0,0,0.0000001,0,0)
+    fits4allpara = as.data.frame(t(rbind(rep(0,100),rep(0,100),rep(0.0000001,100),rep(0,100),rep(0.0000001,100),rep(0,100),rep(0.0000001,100))))
+    colnames(fits4allpara) = c("AIC","RU1","kd1","RU2","kd2","RU3","kd3")
+    comp3fitpass[j] = "N"
+  }
+  else
+  {
+  for (i in 1:100)
+  { 
+    if(capture.output(saved.fits4[[i]]) == "NULL"){fits4aic[i]  = 0}else{fits4aic[i] = AIC(saved.fits4[[i]])[1]}
+  }
+  
+  decayrt4 = array(NA,dim = c(6,100))
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits4[[i]]) != "NULL")
+    {
+      decayrt4[[1,i]] = signif(exp(as.numeric(saved.fits4[[i]]$coefficients[1])),3)
+      decayrt4[[2,i]] = signif(-as.numeric(saved.fits4[[i]]$coefficients[2]),3)
+      decayrt4[[3,i]] = signif(exp(as.numeric(saved.fits4[[i]]$coefficients[3])),3)
+      decayrt4[[4,i]] = signif(-as.numeric(saved.fits4[[i]]$coefficients[4]),3)
+      decayrt4[[5,i]] = signif(exp(as.numeric(saved.fits4[[i]]$coefficients[5])),3)
+      decayrt4[[6,i]] = signif(-as.numeric(saved.fits4[[i]]$coefficients[6]),3)
+    }
+  }
+  
+  fits4allpara = cbind(fits4aic,t(decayrt4))
+  fits4allpara = as.data.frame(fits4allpara)
+  colnames(fits4allpara) = c("AIC","RU1","kd1","RU2","kd2","RU3","kd3")
+  fits4allpara = fits4allpara[order(fits4allpara$AIC),]
+ 
+  comp3fits[[j]] = saved.fits4[[as.numeric(rownames(fits4allpara)[1])]]
+  comp3temp = as.numeric(fits4allpara[1,])
+  comp3temp2 = as.data.frame(split(comp3temp[-1], rep(1:2)))
+  comp3sdtemp = signif(deltamethod(c(~exp(x1),~-x2,~exp(x3),~-x4,~exp(x5),~-x6), coefficients(comp3fits[[j]]), vcov(comp3fits[[j]])),3)
+  comp3sdtemp2 = as.data.frame(split(comp3sdtemp, rep(1:2)))
+  comp3sdtemp3 = cbind(comp3temp2,comp3sdtemp2)
+  comp3temp3 = comp3sdtemp3[order(abs(comp3sdtemp3[,2]), decreasing = F),]
+  comp3temp4 = as.numeric(unlist(t(comp3temp3)))
+  comp3temp5 = c(comp3temp[1],comp3temp4)
+  comp3fitstat[j,] = comp3temp5
+  comp3fitpass[j] = "Y"
+  }
+  
+  # Record results for 1 component fit
+
+  
+  if(length(saved.fits5)==0)
+  {
+    comp1fits[[j]] = y
+    comp1fitstat[j,] = c(0,0,0.0000001,0,0)
+    fits5allpara = as.data.frame(t(rbind(rep(0,100),rep(0,100),rep(0.0000001,100))))
+    colnames(fits5allpara) = c("AIC","RU1","kd1")
+    comp1fitpass[j] = "N"
+  }
+  else
+  {
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits5[[i]]) == "NULL"){fits5aic[i]  = 0}else{fits5aic[i] = AIC(saved.fits5[[i]])[1]}
+  }
+  
+  decayrt5 = array(NA,dim = c(2,100))
+  for (i in 1:100)
+  {
+    if(capture.output(saved.fits5[[i]]) != "NULL")
+    {
+      decayrt5[[1,i]] = signif(exp(as.numeric(saved.fits5[[i]]$coefficients[1])),3)
+      decayrt5[[2,i]] = signif(-as.numeric(saved.fits5[[i]]$coefficients[2]),3)
+    }
+  }
+  
+  fits5allpara = cbind(fits5aic,t(decayrt5))
+  fits5allpara = as.data.frame(fits5allpara)
+  colnames(fits5allpara) = c("AIC","RU1","kd1")
+  fits5allpara = fits5allpara[order(fits5allpara$AIC),]
+  
+  comp1fits[[j]] = saved.fits5[[as.numeric(rownames(fits5allpara)[1])]]
+  comp1sdtemp = signif(deltamethod(c(~exp(x1),~-x2), coefficients(comp1fits[[j]]), vcov(comp1fits[[j]])),3)
+  comp1fitstat[j,] = c(as.numeric(fits5allpara[1,]),comp1sdtemp)
+  comp1fitpass[j] = "Y"
+  }
+  }
+  
+  print(j)
+}
+```
+
+Export fit report
+```{r}
+pdf("PAART fit - plots.pdf", width = 10, height = 9)
+for (j in normallist)
+{
+par(mfrow=c(4,3))
+plot(rawfull[[j]], xlab = "Time (s)", ylab = "Response (nm)")
+abline(v = plotstart)
+abline(v = as.numeric(uniquesample$Start[j]), col = "red")
+abline(v = as.numeric(uniquesample$Stop[j]), col = "red")
+title("Original Data", adj = 0.5, line = 0.5)
+plot(rawpointplot[[j]], ylim=c(0, max(rawpoint[[j]][,2])), xlab = "Time (s)", ylab = "Response (nm)", col = "gray50")
+lines(rawpoint[[j]][,1],if(comp2fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{fitted(comp2fits[[j]])}, col = "red")
+lines(rawpoint[[j]][,1],comp2fitstat[j,2]*exp(-comp2fitstat[j,3]*rawpoint[[j]][,1]), col = "blue")
+lines(rawpoint[[j]][,1],comp2fitstat[j,6]*exp(-comp2fitstat[j,7]*rawpoint[[j]][,1]), col = "orange")
+title("2 components", adj = 0.5, line = 0.5)
+plot(rawpointplot[[j]], ylim=c(0, max(rawpoint[[j]][,2])), xlab = "Time (s)", ylab = "Response (nm)", col = "gray50")
+lines(rawpoint[[j]][,1],if(comp3fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{fitted(comp3fits[[j]])}, col = "red")
+lines(rawpoint[[j]][,1],comp3fitstat[j,2]*exp(-comp3fitstat[j,3]*rawpoint[[j]][,1]), col = "blue")
+lines(rawpoint[[j]][,1],comp3fitstat[j,6]*exp(-comp3fitstat[j,7]*rawpoint[[j]][,1]), col = "orange")
+lines(rawpoint[[j]][,1],comp3fitstat[j,10]*exp(-comp3fitstat[j,11]*rawpoint[[j]][,1]), col = "purple")
+title("3 components", adj = 0.5, line = 0.5)
+plot(rawpointplot[[j]], xlab = "Time (s)", ylab = "Response (nm)", col = "gray50")
+lines(rawpoint[[j]][,1],if(comp1fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{fitted(comp1fits[[j]])}, col = "red")
+title("1 component (fit conly)", adj = 0.5, line = 0.5)
+plot(rawpointplot[[j]], xlab = "Time (s)", ylab = "Response (nm)", col = "gray50")
+lines(rawpoint[[j]][,1],if(comp2fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{fitted(comp2fits[[j]])}, col = "red")
+title("2 components (fit conly)", adj = 0.5, line = 0.5)
+plot(rawpointplot[[j]], xlab = "Time (s)", ylab = "Response (nm)", col = "gray50")
+lines(rawpoint[[j]][,1],if(comp3fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{fitted(comp3fits[[j]])}, col = "red")
+title("3 components (fit conly)", adj = 0.5, line = 0.5)
+plot(rawpoint[[j]][,1], if(comp1fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{rawpoint[[j]][,2]-fitted(comp1fits[[j]])}, xlim = c(0, plotend-as.numeric(uniquesample$Start[j])), xlab = "Time (s)", ylab = "Response (nm)")
+abline(h = 0)
+title("1 component (residual)", adj = 0.5, line = 0.5)
+plot(rawpoint[[j]][,1], if(comp2fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{rawpoint[[j]][,2]-fitted(comp2fits[[j]])}, xlim = c(0, plotend-as.numeric(uniquesample$Start[j])), xlab = "Time (s)", ylab = "Response (nm)")
+abline(h = 0)
+title("2 components (residual)", adj = 0.5, line = 0.5)
+plot(rawpoint[[j]][,1], if(comp3fitpass[j]=="N"){rep(0,length(rawpoint[[j]][,1]))}else{rawpoint[[j]][,2]-fitted(comp3fits[[j]])}, xlim = c(0, plotend-as.numeric(uniquesample$Start[j])), xlab = "Time (s)", ylab = "Response (nm)")
+abline(h = 0)
+title("3 components (residual)", adj = 0.5, line = 0.5)
+plot.new()
+vps1 = baseViewports()
+plot.new()
+vps2 = baseViewports()
+plot.new()
+vps3 = baseViewports()
+pushViewport(vps1$inner, vps1$figure, vps1$plot)
+comp1tabletemp = as.data.frame(rbind(c(comp1fitstat[j,2],comp1fitstat[j,4],formatC(comp1fitstat[j,3], format = "e", digits = 2),formatC(comp1fitstat[j,5], format = "e", digits = 2)),c("","","",""),c("","","",""),c(formatC(comp1fitstat[j,1], format = "f", digits = 2),"","","")))
+colnames(comp1tabletemp) = c("Response","Std","Off rate","Std")
+rownames(comp1tabletemp) = c("#1","",".","AIC")
+grid.table(comp1tabletemp,theme=ttheme_minimal(base_size = 8))
+popViewport(3)
+pushViewport(vps2$inner, vps2$figure, vps2$plot)
+comp2tabletemp = as.data.frame(rbind(c(comp2fitstat[j,2],comp2fitstat[j,4],formatC(comp2fitstat[j,3], format = "e", digits = 2),formatC(comp2fitstat[j,5], format = "e", digits = 2)),c(comp2fitstat[j,6],comp2fitstat[j,8],formatC(comp2fitstat[j,7], format = "e", digits = 2),formatC(comp2fitstat[j,9], format = "e", digits = 2)),c("","","",""),c(formatC(comp2fitstat[j,1], format = "f", digits = 2),"","","")))
+colnames(comp2tabletemp) = c("Response","Std","Off rate","Std")
+rownames(comp2tabletemp) = c("#1","#2","","AIC")
+grid.table(comp2tabletemp,theme=ttheme_minimal(base_size = 8))
+popViewport(3)
+pushViewport(vps3$inner, vps3$figure, vps3$plot)
+comp3tabletemp = as.data.frame(rbind(c(comp3fitstat[j,2],comp3fitstat[j,4],formatC(comp3fitstat[j,3], format = "e", digits = 2),formatC(comp3fitstat[j,5], format = "e", digits = 2)),c(comp3fitstat[j,6],comp3fitstat[j,8],formatC(comp3fitstat[j,7], format = "e", digits = 2),formatC(comp3fitstat[j,9], format = "e", digits = 2)),c(comp3fitstat[j,10],comp3fitstat[j,12],formatC(comp3fitstat[j,11], format = "e", digits = 2),formatC(comp3fitstat[j,13], format = "e", digits = 2)),c(formatC(comp3fitstat[j,1], format = "f", digits = 2),"","","")))
+colnames(comp3tabletemp) = c("Response","Std","Off rate","Std")
+rownames(comp3tabletemp) = c("#1","#2","#3","AIC")
+grid.table(comp3tabletemp,theme=ttheme_minimal(base_size = 8))
+popViewport(3)
+mtext(pagetitles[j], side = 3, line = -2, outer = TRUE)
+}
+dev.off()
+```
+
+Export stats report
+
+```{r}
+comp1fitstat1 = as.data.frame(comp1fitstat)
+comp2fitstat1 = as.data.frame(comp2fitstat[,c(1,2,3,6,7,4,5,8,9)])
+comp3fitstat1 = as.data.frame(comp3fitstat[,c(1,2,3,6,7,10,11,4,5,8,9,12,13)])
+colnames(comp1fitstat1) = c("AIC","Response1","kd1","RespSD1","kdSD1")
+colnames(comp2fitstat1) = c("AIC","Response1","kd1","Response2","kd2","RespSD1","kdSD1","RespSD2","kdSD2")
+colnames(comp3fitstat1) = c("AIC","Response1","kd1","Response2","kd2","Response3","kd3","RespSD1","kdSD1","RespSD2","kdSD2","RespSD3","kdSD3")
+write.xlsx(comp1fitstat1, file = "PAART fit - stats.xlsx", sheetName="1 component", append=FALSE)
+write.xlsx(comp2fitstat1, file = "PAART fit - stats.xlsx", sheetName="2 components", append=TRUE)
+write.xlsx(comp3fitstat1, file = "PAART fit - stats.xlsx", sheetName="3 components", append=TRUE)
+```
