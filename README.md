@@ -42,3 +42,6 @@ Other contributors to code development include Georgia D. Tomaras, S. Moses Denn
 
 # License
 This project is licensed under the GNU GPLv3 license. Please see LICENSE.md file for details.
+
+[![DOI](https://zenodo.org/badge/521721872.svg)](https://zenodo.org/badge/latestdoi/521721872)
+
