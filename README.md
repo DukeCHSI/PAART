@@ -3,7 +3,8 @@
 # Overview
 This repository contains the necessary files to start and execute the first version of Polyclonal Antibodies Avidity Resolution tool (PAART v1.0).
 
-Please cite the repository as the following: Li K, Huntwork RHC, Dodds M, Spreng RL, Dennison SM. Polyclonal Antibodies Avidity Resolution Tool (PAART) [Computer Software] (2022).
+Please cite the repository as the following: Li K, Huntwork RHC, Dodds M, Spreng RL, Dennison SM. Polyclonal Antibodies Avidity Resolution Tool (PAART) [Computer Software] (2022).\
+Alternatively, please cite the publication detailing this repository: Li, K., Dodds, M., Spreng, R. L. et al. (2023). A tool for evaluating heterogeneity in avidity of polyclonal antibodies. <em>Frontiers in immunology</em>, 14, 1049673. https://doi.org/10.3389/fimmu.2023.1049673
 
 # Description
 Polyclonal antibodies avidity resolution tool (PAART) is intended to probe the diversity in the avidity of polyclonal antibody (pAb) responses by analyzing the dissociation kinetics time courses of pAb-antigen interactions and resolve multiple dissociation rates contributing to the overall dissociation by fitting the dissociation time courses to a sum of exponentials decay model.
